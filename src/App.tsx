@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { ArrowDownUp, ArrowRight, Check, ChevronDown, Clipboard, Languages, LoaderCircle, Wifi, WifiOff, X } from 'lucide-react'
+import { ArrowDownUp, ArrowRight, Check, ChevronDown, Clipboard, Download, Languages, LoaderCircle, Wifi, WifiOff, X } from 'lucide-react'
 import { nllbLanguages, type Language } from './languages'
 
 type ModelProgress = { status?: string; file?: string; progress?: number; loaded?: number; total?: number }
@@ -185,7 +185,7 @@ function App() {
           {error && <p className="error-message" role="alert">{error}</p>}
         </section>
 
-        <div className="offline-note"><span className="offline-icon">{online ? <Wifi size={16} /> : <WifiOff size={16} />}</span><div><strong>{modelReady ? 'Prêt pour le hors ligne' : 'Une première étape, ensuite libre'}</strong><p>{modelReady ? 'Le modèle est conservé dans le navigateur. La traduction fonctionne sans envoyer vos textes sur Internet.' : 'Le modèle multilingue (~700 Mo) doit être téléchargé une fois. Ensuite, traduisez hors ligne, sans envoyer vos textes.'}</p></div><span className="note-arrow"><ArrowRight size={17} /></span></div>
+        <div className="offline-note"><span className="offline-icon">{online ? <Wifi size={16} /> : <WifiOff size={16} />}</span><div className="offline-note-copy"><strong>{modelReady ? 'Prêt pour le hors ligne' : 'Une première étape, ensuite libre'}</strong><p>{modelReady ? 'Le modèle est conservé dans le navigateur. La traduction fonctionne sans envoyer vos textes sur Internet.' : 'Le modèle multilingue (~700 Mo) doit être téléchargé une fois. Ensuite, traduisez hors ligne, sans envoyer vos textes.'}</p></div>{modelReady ? <span className="note-arrow"><Check size={17} /></span> : <button className="download-model-button" onClick={loadModel} disabled={loading} aria-busy={loading}>{loading ? <LoaderCircle className="spin" size={15} /> : <Download size={15} />}{loading ? 'Téléchargement…' : 'Télécharger'}<span>(~700 Mo)</span></button>}</div>
 
         <footer className="page-footer"><span>FAIT POUR LES CONVERSATIONS SANS FRONTIÈRES</span><span className="footer-separator" /><span>TRADUCTION LOCALE · AUCUN TEXTE ENVOYÉ</span></footer>
       </section>
