@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
-import { ArrowDownUp, ArrowRight, Check, ChevronDown, Clipboard, Download, Languages, LoaderCircle, RefreshCw, Wifi, WifiOff, X } from 'lucide-react'
+import { ArrowDownUp, ArrowRight, Check, ChevronDown, Clipboard, Cloud, Download, Languages, LoaderCircle, RefreshCw, Smartphone, WifiOff, X } from 'lucide-react'
 import { francAll } from 'franc-min'
 import { nllbLanguages, type Language } from './languages'
+import { translateOnline } from './onlineTranslator'
 
 type ModelProgress = { status?: string; file?: string; progress?: number; loaded?: number; total?: number }
 type WorkerMessage = { type: string; progress?: ModelProgress; text?: string; message?: string; completed?: number; total?: number }
 const MODEL_CACHE_KEY = 'parlotte:nllb-model-cached:v1'
-const TRANSLATION_CACHE_KEY = 'parlotte:translations:v2'
+const TRANSLATION_CACHE_KEY = 'parlotte:translations:v3'
 const MAX_CACHED_TRANSLATIONS = 20
 const MIN_AUTO_DETECT_LENGTH = 20
 const MIN_AUTO_DETECT_MARGIN = 0.12
@@ -66,8 +67,19 @@ function readTranslationCache(): Record<string, string> {
   }
 }
 
-function makeTranslationKey(text: string, source: string, target: string): string {
-  return JSON.stringify([source, target, text])
+function makeTranslationKey(text: string, source: string, target: string, mode: 'online' | 'offline'): string {
+  return JSON.stringify([mode, source, target, text])
+}
+
+function storeTranslation(text: string, source: string, target: string, mode: 'online' | 'offline', result: string): void {
+  const cache = readTranslationCache()
+  cache[makeTranslationKey(text, source, target, mode)] = result
+  try {
+    const recentEntries = Object.entries(cache).slice(-MAX_CACHED_TRANSLATIONS)
+    localStorage.setItem(TRANSLATION_CACHE_KEY, JSON.stringify(Object.fromEntries(recentEntries)))
+  } catch {
+    // Translation still succeeds if browser storage is unavailable or full.
+  }
 }
 
 function App() {
@@ -77,6 +89,7 @@ function App() {
   const modelCachedRef = useRef(localStorage.getItem(MODEL_CACHE_KEY) === '1')
   const [source, setSource] = useState('auto')
   const [target, setTarget] = useState('fra_Latn')
+  const [mode, setMode] = useState<'online' | 'offline'>('online')
   const [input, setInput] = useState('')
   const [output, setOutput] = useState('')
   const [modelReady, setModelReady] = useState(false)
@@ -125,15 +138,7 @@ function App() {
         const translatedText = message.text ?? ''
         setOutput(translatedText)
         if (activeTranslation.current) {
-          const cache = readTranslationCache()
-          const key = makeTranslationKey(activeTranslation.current.text, activeTranslation.current.source, activeTranslation.current.target)
-          cache[key] = translatedText
-          try {
-            const recentEntries = Object.entries(cache).slice(-MAX_CACHED_TRANSLATIONS)
-            localStorage.setItem(TRANSLATION_CACHE_KEY, JSON.stringify(Object.fromEntries(recentEntries)))
-          } catch {
-            // Translation still succeeds if browser storage is unavailable or full.
-          }
+          storeTranslation(activeTranslation.current.text, activeTranslation.current.source, activeTranslation.current.target, 'offline', translatedText)
           activeTranslation.current = null
         }
         setTranslating(false)
@@ -184,16 +189,19 @@ function App() {
   }
 
   const translate = (forceRecalculation = false) => {
-    if (!input.trim() || !worker.current) return
+    const currentWorker = worker.current
+    if (!input.trim() || (mode === 'offline' && !currentWorker)) return
     const detectedSource = source === 'auto' ? detectSourceLanguage(input) : undefined
-    const sourceCode = source === 'auto' ? detectedSource?.code : source
+    const sourceCode = source === 'auto'
+      ? mode === 'online' ? 'auto' : detectedSource?.code
+      : source
     if (!sourceCode) {
       setError('Langue source non reconnue automatiquement. Choisissez-la dans le menu « DE ».')
       return
     }
-    if (source === 'auto' && detectedSource) setSource(detectedSource.code)
+    if (mode === 'offline' && source === 'auto' && detectedSource) setSource(detectedSource.code)
     const text = input.trim()
-    const translationKey = makeTranslationKey(text, sourceCode, target)
+    const translationKey = makeTranslationKey(text, sourceCode, target, mode)
     const cache = readTranslationCache()
     const cachedTranslation = cache[translationKey]
     if (!forceRecalculation && cachedTranslation !== undefined) {
@@ -210,24 +218,38 @@ function App() {
       setTranslationReused(true)
       return
     }
-    if (sourceCode === target) {
+    if (sourceCode !== 'auto' && sourceCode === target) {
       setOutput(text)
       setTranslationReused(true)
       setError('')
       return
     }
     setTranslationReused(false)
+    setTranslating(true)
+    setTranslationProgress(mode === 'online' ? 'En ligne' : '')
+    setError('')
+
+    if (mode === 'online') {
+      void translateOnline(text, sourceCode, target).then((translatedText) => {
+        setOutput(translatedText)
+        storeTranslation(text, sourceCode, target, 'online', translatedText)
+      }).catch((translationError: unknown) => {
+        setError(translationError instanceof Error ? translationError.message : 'La traduction en ligne a échoué.')
+      }).finally(() => {
+        setTranslating(false)
+        setTranslationProgress('')
+      })
+      return
+    }
+
     if (!modelReady) {
       pendingTranslation.current = { text, source: sourceCode, target }
       loadModel()
       return
     }
-    setTranslating(true)
-    setTranslationProgress('')
-    setError('')
     const request = { text, source: sourceCode, target }
     activeTranslation.current = request
-    worker.current.postMessage({ type: 'translate', ...request })
+    currentWorker?.postMessage({ type: 'translate', ...request })
   }
 
   const recalculateTranslation = () => {
@@ -237,6 +259,7 @@ function App() {
   }
 
   const swap = () => {
+    if (source === 'auto') return
     setSource(target)
     setTarget(source)
     if (output) {
@@ -263,7 +286,7 @@ function App() {
         </a>
         <div className="topbar-right">
           <span className={`connection ${online ? 'is-online' : ''}`}><span className="connection-dot" />{online ? 'En ligne' : 'Hors ligne'}</span>
-          <span className="privacy-label"><span className="privacy-mark">✳</span> Privé par nature</span>
+          <span className="privacy-label"><span className="privacy-mark">✳</span>{mode === 'online' ? 'Texte envoyé au service en ligne' : 'Texte gardé sur l’appareil'}</span>
         </div>
       </header>
 
@@ -271,10 +294,14 @@ function App() {
         <div className="intro">
           <div className="eyebrow"><span /> LE MONDE, À PORTÉE DE MOTS</div>
           <h1>Les mots voyagent.<br /><em>Vos données, non.</em></h1>
-          <p>Traduisez directement sur votre appareil. Vos textes restent à vous, même sans connexion.</p>
+          <p>{mode === 'online' ? 'Traduction rapide en ligne. Votre texte est envoyé au service de traduction.' : 'Traduction locale. Votre texte reste sur cet appareil, même hors connexion.'}</p>
         </div>
 
         <section className="translator" aria-label="Traducteur">
+          <div className="mode-bar" role="group" aria-label="Mode de traduction">
+            <button className={`mode-option ${mode === 'online' ? 'selected' : ''}`} onClick={() => { setMode('online'); setError(''); setTranslationReused(false) }} aria-pressed={mode === 'online'}><Cloud size={16} /> En ligne</button>
+            <button className={`mode-option ${mode === 'offline' ? 'selected' : ''}`} onClick={() => { setMode('offline'); setError(''); setTranslationReused(false) }} aria-pressed={mode === 'offline'}><Smartphone size={16} /> Hors ligne</button>
+          </div>
           <div className="language-bar">
             <label className="language-select"><span>DE</span><select value={source} onChange={(event) => { setSource(event.target.value); setTranslationReused(false) }} aria-label="Langue source"><option value="auto">Détection automatique</option>{languages.map((language) => <option key={language.code} value={language.code}>{language.name}</option>)}</select><ChevronDown size={15} /></label>
             <button className="swap-button" onClick={swap} title="Inverser les langues" aria-label="Inverser les langues"><ArrowDownUp size={17} /></button>
@@ -296,20 +323,20 @@ function App() {
           <div className="action-row">
             <div className="model-status">
               <span className={`model-indicator ${modelReady ? 'ready' : loading ? 'busy' : ''}`} />
-              <span>{loading ? status : translating ? `Traduction en cours ${translationProgress}` : translationReused ? 'Résultat réutilisé sans recalcul' : modelReady ? 'Moteur chargé en mémoire' : modelCached ? 'Modèle enregistré · hors ligne' : 'Modèle requis pour démarrer'}</span>
+              <span>{loading ? status : translating ? mode === 'online' ? 'Traduction en ligne…' : `Traduction locale ${translationProgress}` : translationReused ? 'Résultat réutilisé sans recalcul' : mode === 'online' ? 'Service en ligne · pas de modèle à charger' : modelReady ? 'Moteur chargé en mémoire' : modelCached ? 'Modèle enregistré · hors ligne' : 'Modèle requis pour démarrer'}</span>
             </div>
             <button className="translate-button" onClick={() => translate()} disabled={!input.trim() || translating || loading}>
               {translating ? <><LoaderCircle className="spin" size={17} /> Traduction {translationProgress}</> : translationReused ? <><Check size={17} /> Réutilisée</> : <>{!modelReady && <Languages size={17} />} Traduire <ArrowRight size={17} /></>}
             </button>
           </div>
 
-          <div className={`download-progress ${loading ? '' : 'is-idle'}`} aria-hidden={!loading}><div className="progress-track"><span style={{ width: `${progress}%` }} /></div><span>{modelCached ? 'Chargement du modèle depuis le cache local · aucun nouveau téléchargement' : `${progress ? `${progress}%` : 'Préparation'} · premier téléchargement du modèle`}</span></div>
+          {mode === 'offline' && <div className={`download-progress ${loading ? '' : 'is-idle'}`} aria-hidden={!loading}><div className="progress-track"><span style={{ width: `${progress}%` }} /></div><span>{modelCached ? 'Chargement du modèle depuis le cache local · aucun nouveau téléchargement' : `${progress ? `${progress}%` : 'Préparation'} · premier téléchargement du modèle`}</span></div>}
           {error && <p className="error-message" role="alert">{error}</p>}
         </section>
 
-        <div className="offline-note"><span className="offline-icon">{online ? <Wifi size={16} /> : <WifiOff size={16} />}</span><div className="offline-note-copy"><strong>{modelReady ? 'Prêt pour le hors ligne' : modelCached ? 'Modèle déjà téléchargé' : 'Une première étape, ensuite libre'}</strong><p>{modelReady ? 'Les nouveaux textes sont calculés localement. Les 20 dernières traductions exactes sont enregistrées pour être réutilisées sans calcul.' : modelCached ? 'Le modèle reste dans le cache après fermeture. Il est rechargé depuis l’appareil, sans nouveau téléchargement. Les 20 dernières traductions peuvent être réutilisées sans calcul.' : 'Le modèle multilingue (~900 Mo) est téléchargé une seule fois. Les textes restent sur cet appareil.'}</p></div>{modelReady ? <span className="note-arrow"><Check size={17} /></span> : <button className="download-model-button" onClick={loadModel} disabled={loading} aria-busy={loading}>{loading ? <LoaderCircle className="spin" size={15} /> : modelCached ? <Languages size={15} /> : <Download size={15} />}{loading ? 'Chargement…' : modelCached ? 'Charger hors ligne' : 'Télécharger'}{!modelCached && <span>(~900 Mo)</span>}</button>}</div>
+        <div className="offline-note"><span className="offline-icon">{mode === 'online' ? online ? <Cloud size={16} /> : <WifiOff size={16} /> : modelReady ? <Check size={16} /> : <Smartphone size={16} />}</span><div className="offline-note-copy"><strong>{mode === 'online' ? 'Traduction en ligne' : modelReady ? 'Prêt pour le hors ligne' : modelCached ? 'Modèle déjà téléchargé' : 'Télécharger le modèle hors ligne'}</strong><p>{mode === 'online' ? 'Le texte est envoyé à MyMemory, qui indique pouvoir conserver les segments soumis. Quota gratuit anonyme : 5 000 caractères par jour. Pour un texte confidentiel, choisissez Hors ligne.' : modelReady ? 'Le texte reste sur cet appareil. Le moteur utilise la mémoire pendant le calcul puis la libère ; le modèle reste dans le cache local.' : modelCached ? 'Le modèle (~900 Mo) est conservé dans le cache du navigateur. Le chargement ne le télécharge pas à nouveau.' : 'Le modèle multilingue (~900 Mo) nécessite un premier téléchargement. Il reste ensuite dans le cache de cet appareil.'}</p></div>{mode === 'offline' && !modelReady && <button className="download-model-button" onClick={loadModel} disabled={loading} aria-busy={loading}>{loading ? <LoaderCircle className="spin" size={15} /> : modelCached ? <Languages size={15} /> : <Download size={15} />}{loading ? 'Chargement…' : modelCached ? 'Charger le modèle' : 'Télécharger'}{!modelCached && <span>(~900 Mo)</span>}</button>}</div>
 
-        <footer className="page-footer"><span>FAIT POUR LES CONVERSATIONS SANS FRONTIÈRES</span><span className="footer-separator" /><span>TRADUCTION LOCALE · AUCUN TEXTE ENVOYÉ</span></footer>
+        <footer className="page-footer"><span>FAIT POUR LES CONVERSATIONS SANS FRONTIÈRES</span><span className="footer-separator" /><span>{mode === 'online' ? 'EN LIGNE · TEXTE ENVOYÉ AU SERVICE' : 'LOCAL · AUCUN TEXTE ENVOYÉ'}</span></footer>
       </section>
     </main>
   )
