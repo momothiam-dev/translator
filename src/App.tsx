@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react'
-import { ArrowDownUp, ArrowRight, Check, ChevronDown, Clipboard, Cloud, LoaderCircle, RefreshCw, X } from 'lucide-react'
+import { ArrowDownUp, ArrowRight, Check, ChevronDown, Clipboard, Cloud, LoaderCircle, RefreshCw, Smartphone, X } from 'lucide-react'
 import { nllbLanguages, type Language } from './languages'
 import { translateOnline } from './onlineTranslator'
+import { browserTranslationAvailable, translateInBrowser } from './browserTranslator'
 
 type TranslationCache = Record<string, string>
+type TranslationMode = 'online' | 'device'
 const TRANSLATION_CACHE_KEY = 'parlotte:online-translations:v1'
 const MAX_CACHED_TRANSLATIONS = 20
 
@@ -50,8 +52,8 @@ function readTranslationCache(): TranslationCache {
   }
 }
 
-function translationKey(text: string, source: string, target: string): string {
-  return JSON.stringify([source, target, text])
+function translationKey(text: string, source: string, target: string, mode: TranslationMode): string {
+  return JSON.stringify([mode, source, target, text])
 }
 
 function storeTranslation(key: string, value: string): void {
@@ -67,16 +69,20 @@ function storeTranslation(key: string, value: string): void {
 function App() {
   const [source, setSource] = useState('auto')
   const [target, setTarget] = useState('fra_Latn')
+  const [mode, setMode] = useState<TranslationMode>('online')
+  const [deviceTranslationAvailable, setDeviceTranslationAvailable] = useState(false)
   const [input, setInput] = useState('')
   const [output, setOutput] = useState('')
   const [translating, setTranslating] = useState(false)
   const [translationReused, setTranslationReused] = useState(false)
+  const [translationProgress, setTranslationProgress] = useState('')
   const [error, setError] = useState('')
   const [copied, setCopied] = useState(false)
   const [online, setOnline] = useState(navigator.onLine)
 
   useEffect(() => {
     const updateConnection = () => setOnline(navigator.onLine)
+    setDeviceTranslationAvailable(browserTranslationAvailable())
     void caches.delete('transformers-cache')
     localStorage.removeItem('parlotte:nllb-model-cached:v1')
     window.addEventListener('online', updateConnection)
@@ -90,13 +96,17 @@ function App() {
   const translate = async (force = false) => {
     const text = input.trim()
     if (!text || translating) return
-    if (!navigator.onLine) {
+    if (mode === 'online' && !navigator.onLine) {
       setOnline(false)
-      setError('Une connexion Internet est nécessaire. Cette version ne télécharge aucun modèle hors ligne.')
+      setError('Une connexion Internet est nécessaire pour le mode en ligne. Essayez Sur cet appareil si votre navigateur le prend en charge.')
+      return
+    }
+    if (mode === 'device' && source === 'auto') {
+      setError('Choisissez la langue source pour traduire sur cet appareil.')
       return
     }
 
-    const key = translationKey(text, source, target)
+    const key = translationKey(text, source, target, mode)
     const cached = readTranslationCache()[key]
     if (!force && cached !== undefined) {
       setOutput(cached)
@@ -113,15 +123,19 @@ function App() {
 
     setTranslating(true)
     setTranslationReused(false)
+    setOutput('')
     setError('')
     try {
-      const result = await translateOnline(text, source, target)
+      const result = mode === 'online'
+        ? await translateOnline(text, source, target)
+        : await translateInBrowser(text, source, target, (progress) => setTranslationProgress(`Pack de langue ${progress}%`))
       setOutput(result)
       storeTranslation(key, result)
     } catch (translationError) {
       setError(translationError instanceof Error ? translationError.message : 'La traduction en ligne a échoué. Réessayez.')
     } finally {
       setTranslating(false)
+      setTranslationProgress('')
     }
   }
 
@@ -158,28 +172,32 @@ function App() {
         </a>
         <div className="topbar-right">
           <span className={`connection ${online ? 'is-online' : ''}`}><span className="connection-dot" />{online ? 'En ligne' : 'Hors ligne'}</span>
-          <span className="privacy-label"><span className="privacy-mark">✳</span> Texte envoyé au service</span>
+          <span className="privacy-label"><span className="privacy-mark">✳</span>{mode === 'online' ? 'Texte envoyé au service' : 'Texte gardé sur l’appareil'}</span>
         </div>
       </header>
 
       <section className="workspace">
         <div className="intro">
-          <div className="eyebrow"><span /> TRADUCTION EN LIGNE</div>
-          <h1>Les mots voyagent.<br /><em>Sans gros téléchargement.</em></h1>
-          <p>Traduisez sans installer de modèle. Une connexion Internet est nécessaire.</p>
+          <div className="eyebrow"><span /> TRADUCTION SANS CONTRÔLE AUDIO</div>
+          <h1>Les mots voyagent.<br /><em>En ligne ou ici.</em></h1>
+          <p>{mode === 'online' ? 'Traduction en ligne, compatible avec tous les appareils.' : 'Le navigateur gère le pack de langue sur les appareils compatibles.'}</p>
         </div>
 
-        <section className="translator" aria-label="Traducteur en ligne">
+        <section className="translator" aria-label="Traducteur">
+          <div className="mode-bar" role="group" aria-label="Mode de traduction">
+            <button className={`mode-option ${mode === 'online' ? 'selected' : ''}`} onClick={() => { setMode('online'); setError(''); setTranslationReused(false) }} aria-pressed={mode === 'online'}><Cloud size={16} /> En ligne</button>
+            <button className={`mode-option ${mode === 'device' ? 'selected' : ''}`} onClick={() => { setMode('device'); setError(''); setTranslationReused(false) }} disabled={!deviceTranslationAvailable} title={!deviceTranslationAvailable ? 'Cette fonction n’est pas proposée par ce navigateur' : 'Traduire avec le moteur du navigateur'} aria-pressed={mode === 'device'}><Smartphone size={16} /> Sur cet appareil</button>
+          </div>
           <div className="language-bar">
-            <label className="language-select"><span>DE</span><select value={source} onChange={(event) => { setSource(event.target.value); setTranslationReused(false) }} aria-label="Langue source"><option value="auto">Détection automatique</option>{languages.map((language) => <option key={language.code} value={language.code}>{language.name}</option>)}</select><ChevronDown size={15} /></label>
+            <label className="language-select"><span>DE</span><select value={source} onChange={(event) => { setSource(event.target.value); setTranslationReused(false); setOutput('') }} aria-label="Langue source"><option value="auto">Détection automatique</option>{languages.map((language) => <option key={language.code} value={language.code}>{language.name}</option>)}</select><ChevronDown size={15} /></label>
             <button className="swap-button" onClick={swap} disabled={source === 'auto'} title="Inverser les langues" aria-label="Inverser les langues"><ArrowDownUp size={17} /></button>
-            <label className="language-select target-select"><span>VERS</span><select value={target} onChange={(event) => { setTarget(event.target.value); setTranslationReused(false) }} aria-label="Langue cible">{languages.map((language) => <option key={language.code} value={language.code}>{language.name}</option>)}</select><ChevronDown size={15} /></label>
-            <span className="language-count"><Cloud size={14} /> En ligne</span>
+            <label className="language-select target-select"><span>VERS</span><select value={target} onChange={(event) => { setTarget(event.target.value); setTranslationReused(false); setOutput('') }} aria-label="Langue cible">{languages.map((language) => <option key={language.code} value={language.code}>{language.name}</option>)}</select><ChevronDown size={15} /></label>
+            <span className="language-count">{mode === 'online' ? <Cloud size={14} /> : <Smartphone size={14} />}{mode === 'online' ? 'En ligne' : 'Navigateur'}</span>
           </div>
 
           <div className="translation-panes">
             <div className="pane input-pane">
-              <textarea value={input} onChange={(event) => { setInput(event.target.value); setTranslationReused(false) }} maxLength={5000} placeholder="Écrivez ou collez votre texte ici…" aria-label="Texte à traduire" />
+              <textarea value={input} onChange={(event) => { setInput(event.target.value); setTranslationReused(false); setOutput('') }} maxLength={5000} placeholder="Écrivez ou collez votre texte ici…" aria-label="Texte à traduire" />
               <div className="pane-footer"><span>{input.length} / 5 000</span><button className="icon-button" onClick={() => { setInput(''); setOutput('') }} disabled={!input} title="Effacer le texte" aria-label="Effacer le texte"><X size={17} /></button></div>
             </div>
             <div className="pane output-pane" aria-live="polite">
@@ -191,18 +209,18 @@ function App() {
           <div className="action-row">
             <div className="model-status">
               <span className={`model-indicator ${translating ? 'busy' : online ? 'ready' : ''}`} />
-              <span>{translating ? 'Requête en cours…' : translationReused ? 'Résultat réutilisé sans requête' : online ? 'Service prêt · aucun modèle local' : 'Connexion Internet requise'}</span>
+              <span>{translating ? translationProgress || (mode === 'online' ? 'Requête en ligne…' : 'Traduction sur cet appareil…') : translationReused ? 'Résultat réutilisé sans requête' : mode === 'online' ? online ? 'Service en ligne prêt' : 'Connexion Internet requise' : deviceTranslationAvailable ? 'Moteur géré par le navigateur' : 'Non pris en charge sur cet appareil'}</span>
             </div>
-            <button className="translate-button" onClick={() => void translate()} disabled={!input.trim() || translating || !online}>
+            <button className="translate-button" onClick={() => void translate()} disabled={!input.trim() || translating || (mode === 'online' && !online) || (mode === 'device' && !deviceTranslationAvailable)}>
               {translating ? <><LoaderCircle className="spin" size={17} /> Traduction…</> : translationReused ? <><Check size={17} /> Réutilisée</> : <>Traduire <ArrowRight size={17} /></>}
             </button>
           </div>
           {error && <p className="error-message" role="alert">{error}</p>}
         </section>
 
-        <div className="offline-note"><span className="offline-icon"><Cloud size={16} /></span><div className="offline-note-copy"><strong>Pas de modèle à télécharger</strong><p>Les textes sont transmis à MyMemory pour être traduits. Quota gratuit anonyme : 5 000 caractères par jour. Le cache retient les 20 derniers résultats sur cet appareil.</p></div><span className="note-arrow"><Check size={17} /></span></div>
+        <div className="offline-note"><span className="offline-icon">{mode === 'online' ? <Cloud size={16} /> : <Smartphone size={16} />}</span><div className="offline-note-copy"><strong>{mode === 'online' ? 'Mode compatible avec tous les appareils' : 'Mode fourni par le navigateur'}</strong><p>{mode === 'online' ? 'Le texte est envoyé à MyMemory, qui indique pouvoir conserver les segments. Quota gratuit anonyme : 5 000 caractères par jour.' : deviceTranslationAvailable ? 'Le navigateur gère lui-même le pack de langue. Disponible sur certains navigateurs de bureau uniquement ; mobile Android et Safari utilisent le mode en ligne.' : 'Ce navigateur ne propose pas de traduction locale. Revenez à En ligne. Aucun modèle lourd n’est chargé par le site.'}</p></div><span className="note-arrow">{mode === 'online' ? <Check size={17} /> : <Smartphone size={17} />}</span></div>
 
-        <footer className="page-footer"><span>TRADUCTION EN LIGNE</span><span className="footer-separator" /><span>LE MODE HORS LIGNE N’EST PAS DISPONIBLE</span></footer>
+        <footer className="page-footer"><span>AUCUN ACCÈS À L’AUDIO</span><span className="footer-separator" /><span>{mode === 'online' ? 'COMPATIBLE WEB ET MOBILE' : 'MOTEUR FOURNI PAR LE NAVIGATEUR'}</span></footer>
       </section>
     </main>
   )
