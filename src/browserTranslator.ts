@@ -1,12 +1,5 @@
 type NativeTranslationResult = { translate: (text: string) => Promise<string>; destroy?: () => void }
 type NativeDownloadProgress = Event & { loaded: number; total: number }
-type NativeTranslatorApi = {
-  create: (options: {
-    sourceLanguage: string
-    targetLanguage: string
-    monitor?: (monitor: EventTarget) => void
-  }) => Promise<NativeTranslationResult>
-}
 
 const languageAliases: Record<string, string> = {
   arb: 'ar', azb: 'az', azj: 'az', ces: 'cs', cmn: 'zh', deu: 'de', ell: 'el', eng: 'en',
@@ -16,8 +9,16 @@ const languageAliases: Record<string, string> = {
   tam: 'ta', tel: 'te', tha: 'th', tur: 'tr', ukr: 'uk', vie: 'vi', zho: 'zh',
 }
 
+function getTranslatorApi(): any {
+  const g = globalThis as any
+  if (g.translation && typeof g.translation.createTranslator === 'function') return g.translation
+  if (g.ai && g.ai.translator && typeof g.ai.translator.create === 'function') return g.ai.translator
+  if (g.Translator && typeof g.Translator.create === 'function') return g.Translator
+  return undefined
+}
+
 export function browserTranslationAvailable(): boolean {
-  return Boolean((globalThis as typeof globalThis & { Translator?: NativeTranslatorApi }).Translator)
+  return Boolean(getTranslatorApi())
 }
 
 export function browserLanguageCode(modelCode: string): string | undefined {
@@ -38,23 +39,32 @@ export async function translateInBrowser(
     throw new Error('Cette langue n’est pas prise en charge par le traducteur intégré du navigateur. Essayez le mode En ligne.')
   }
 
-  const api = (globalThis as typeof globalThis & { Translator?: NativeTranslatorApi }).Translator
+  const api = getTranslatorApi()
   if (!api) throw new Error('La traduction sur cet appareil n’est pas disponible dans ce navigateur. Utilisez le mode En ligne.')
 
-  const translator = await api.create({
+  const options = {
     sourceLanguage,
     targetLanguage,
-    monitor(monitor) {
+    monitor(monitor: EventTarget) {
       monitor.addEventListener('downloadprogress', (event) => {
         const progress = event as NativeDownloadProgress
         if (progress.total > 0) onDownloadProgress(Math.round(progress.loaded / progress.total * 100))
       })
     },
-  })
+  }
+
+  let translator: NativeTranslationResult
+  if (api.createTranslator) {
+    translator = await api.createTranslator(options)
+  } else {
+    translator = await api.create(options)
+  }
 
   try {
     return await translator.translate(text)
   } finally {
-    translator.destroy?.()
+    if (translator.destroy) {
+      translator.destroy()
+    }
   }
 }
