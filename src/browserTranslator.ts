@@ -11,9 +11,9 @@ const languageAliases: Record<string, string> = {
 
 function getTranslatorApi(): any {
   const g = globalThis as any
-  if (g.translation && typeof g.translation.createTranslator === 'function') return g.translation
-  if (g.ai && g.ai.translator && typeof g.ai.translator.create === 'function') return g.ai.translator
-  if (g.Translator && typeof g.Translator.create === 'function') return g.Translator
+  if (g.translation) return g.translation
+  if (g.ai && g.ai.translator) return g.ai.translator
+  if (g.Translator) return g.Translator
   return undefined
 }
 
@@ -45,6 +45,22 @@ export async function translateInBrowser(
   const options = {
     sourceLanguage,
     targetLanguage,
+  }
+  
+  if (typeof api.canTranslate === 'function') {
+    const canTranslate = await api.canTranslate(options)
+    if (canTranslate === 'no') {
+      throw new Error('Cette paire de langues n’est pas prise en charge. Essayez le mode En ligne.')
+    }
+  } else if (typeof api.availability === 'function') {
+    const availability = await api.availability(options)
+    if (availability === 'no') {
+      throw new Error('Cette paire de langues n’est pas prise en charge. Essayez le mode En ligne.')
+    }
+  }
+
+  const monitorOptions = {
+    ...options,
     monitor(monitor: EventTarget) {
       monitor.addEventListener('downloadprogress', (event) => {
         const progress = event as NativeDownloadProgress
@@ -54,10 +70,12 @@ export async function translateInBrowser(
   }
 
   let translator: NativeTranslationResult
-  if (api.createTranslator) {
-    translator = await api.createTranslator(options)
+  if (typeof api.createTranslator === 'function') {
+    translator = await api.createTranslator(monitorOptions)
+  } else if (typeof api.create === 'function') {
+    translator = await api.create(monitorOptions)
   } else {
-    translator = await api.create(options)
+    throw new Error('API de traduction non supportée par cette version.')
   }
 
   try {
