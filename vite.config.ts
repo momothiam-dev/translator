@@ -9,9 +9,9 @@ export default defineConfig({
       registerType: 'autoUpdate',
       includeAssets: ['parlotte.svg'],
       manifest: {
-        name: 'Parlotte — Traducteur hors ligne',
+        name: 'Parlotte — Traducteur en ligne',
         short_name: 'Parlotte',
-        description: 'Traduisez vos textes en privé, même sans connexion.',
+        description: 'Traduisez vos textes en ligne, sans télécharger de modèle.',
         theme_color: '#f6f5f0',
         background_color: '#f6f5f0',
         display: 'standalone',

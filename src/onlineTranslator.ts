@@ -121,7 +121,7 @@ export async function translateOnline(text: string, source: string, target: stri
         throw new Error('La limite gratuite du service en ligne est atteinte (5 000 caractères par jour). Passez en mode hors ligne ou réessayez demain.')
       }
       if (result.responseStatus !== 200 || !result.responseData?.translatedText) {
-        throw new Error(result.responseDetails || 'Le service en ligne n’a pas pu traduire ce texte.')
+        throw new Error(result.responseDetails || 'Aucune proposition disponible pour cette phrase. Reformulez-la ou réessayez plus tard.')
       }
       translatedChunks.push(decodeEntities(result.responseData.translatedText))
     }
