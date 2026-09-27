@@ -1,9 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
 import { ArrowDownUp, ArrowRight, Check, ChevronDown, Clipboard, Download, Languages, LoaderCircle, Wifi, WifiOff, X } from 'lucide-react'
+import { franc } from 'franc-min'
 import { nllbLanguages, type Language } from './languages'
 
 type ModelProgress = { status?: string; file?: string; progress?: number; loaded?: number; total?: number }
-type WorkerMessage = { type: string; progress?: ModelProgress; text?: string; message?: string }
+type WorkerMessage = { type: string; progress?: ModelProgress; text?: string; message?: string; completed?: number; total?: number }
+const MODEL_CACHE_KEY = 'parlotte:nllb-model-cached:v1'
+const TRANSLATION_CACHE_KEY = 'parlotte:translations:v1'
+const MAX_CACHED_TRANSLATIONS = 20
+const detectedLanguageAliases: Record<string, string> = { cmn: 'zho_Hans', zlm: 'zsm_Latn' }
 
 const featuredLanguages: Language[] = [
   { name: 'Français', code: 'fra_Latn' }, { name: 'Anglais', code: 'eng_Latn' },
@@ -38,16 +43,41 @@ const languageMap = new Map<string, Language>()
 for (const language of [...nllbLanguages, ...featuredLanguages]) languageMap.set(language.code, language)
 const languages = [...languageMap.values()].sort((left, right) => left.name.localeCompare(right.name, 'fr'))
 
+function detectSourceLanguage(text: string): Language | undefined {
+  const detectedCode = franc(text, { minLength: 10 })
+  if (detectedCode === 'und') return undefined
+  const nllbCode = detectedLanguageAliases[detectedCode]
+    ?? nllbLanguages.find((language) => language.code.startsWith(`${detectedCode}_`))?.code
+  return nllbCode ? languageMap.get(nllbCode) : undefined
+}
+
+function readTranslationCache(): Record<string, string> {
+  try {
+    const cached = localStorage.getItem(TRANSLATION_CACHE_KEY)
+    return cached ? JSON.parse(cached) as Record<string, string> : {}
+  } catch {
+    return {}
+  }
+}
+
+function makeTranslationKey(text: string, source: string, target: string): string {
+  return JSON.stringify([source, target, text])
+}
+
 function App() {
   const worker = useRef<Worker | null>(null)
   const pendingTranslation = useRef<{ text: string; source: string; target: string } | null>(null)
-  const [source, setSource] = useState('eng_Latn')
+  const activeTranslation = useRef<{ text: string; source: string; target: string } | null>(null)
+  const [source, setSource] = useState('auto')
   const [target, setTarget] = useState('fra_Latn')
   const [input, setInput] = useState('')
   const [output, setOutput] = useState('')
   const [modelReady, setModelReady] = useState(false)
+  const [modelCached, setModelCached] = useState(() => localStorage.getItem(MODEL_CACHE_KEY) === '1')
   const [loading, setLoading] = useState(false)
   const [translating, setTranslating] = useState(false)
+  const [translationProgress, setTranslationProgress] = useState('')
+  const [translationReused, setTranslationReused] = useState(false)
   const [progress, setProgress] = useState(0)
   const [status, setStatus] = useState('')
   const [error, setError] = useState('')
@@ -62,35 +92,78 @@ function App() {
       if (message.type === 'progress') {
         const detail = message.progress
         if (detail?.status === 'progress' && typeof detail.progress === 'number') setProgress(Math.round(detail.progress))
-        if (detail?.status === 'downloading') setStatus('Téléchargement du modèle…')
+        if (detail?.status === 'downloading') setStatus(modelCached ? 'Chargement du modèle enregistré…' : 'Téléchargement initial du modèle…')
         if (detail?.status === 'ready') setStatus('Préparation du modèle…')
       } else if (message.type === 'ready') {
         setModelReady(true)
+        setModelCached(true)
+        localStorage.setItem(MODEL_CACHE_KEY, '1')
+        if (navigator.storage?.persist) void navigator.storage.persist().catch(() => false)
         setLoading(false)
         setStatus('Modèle prêt sur cet appareil')
         if (pendingTranslation.current) {
-          worker.current?.postMessage({ type: 'translate', ...pendingTranslation.current })
+          const pending = pendingTranslation.current
+          worker.current?.postMessage({ type: 'translate', ...pending })
+          activeTranslation.current = pending
           pendingTranslation.current = null
           setTranslating(true)
         }
+      } else if (message.type === 'unloaded') {
+        setModelReady(false)
+        setStatus('Modèle conservé hors ligne')
+      } else if (message.type === 'translation-progress') {
+        setTranslationProgress(`${message.completed ?? 0}/${message.total ?? 0}`)
       } else if (message.type === 'translated') {
-        setOutput(message.text ?? '')
+        const translatedText = message.text ?? ''
+        setOutput(translatedText)
+        if (activeTranslation.current) {
+          const cache = readTranslationCache()
+          const key = makeTranslationKey(activeTranslation.current.text, activeTranslation.current.source, activeTranslation.current.target)
+          cache[key] = translatedText
+          try {
+            const recentEntries = Object.entries(cache).slice(-MAX_CACHED_TRANSLATIONS)
+            localStorage.setItem(TRANSLATION_CACHE_KEY, JSON.stringify(Object.fromEntries(recentEntries)))
+          } catch {
+            // Translation still succeeds if browser storage is unavailable or full.
+          }
+          activeTranslation.current = null
+        }
         setTranslating(false)
+        setTranslationProgress('')
+        setTranslationReused(false)
         setError('')
       } else if (message.type === 'error') {
         setError(message.message ?? 'Impossible de charger le modèle.')
         pendingTranslation.current = null
+        activeTranslation.current = null
         setLoading(false)
         setTranslating(false)
+        setTranslationProgress('')
       }
     })
+    instance.addEventListener('error', (event) => {
+      setError(event.message || 'Le moteur de traduction a été interrompu. Réessayez avec un texte plus court.')
+      setLoading(false)
+      setTranslating(false)
+      pendingTranslation.current = null
+    })
+    instance.addEventListener('messageerror', () => {
+      setError('La réponse du moteur est illisible. Rechargez la page et réessayez.')
+      setLoading(false)
+      setTranslating(false)
+    })
     const updateConnection = () => setOnline(navigator.onLine)
+    const releaseMemoryWhenHidden = () => {
+      if (document.visibilityState === 'hidden') instance.postMessage({ type: 'unload' })
+    }
     window.addEventListener('online', updateConnection)
     window.addEventListener('offline', updateConnection)
+    document.addEventListener('visibilitychange', releaseMemoryWhenHidden)
     return () => {
       instance.terminate()
       window.removeEventListener('online', updateConnection)
       window.removeEventListener('offline', updateConnection)
+      document.removeEventListener('visibilitychange', releaseMemoryWhenHidden)
     }
   }, [])
 
@@ -98,20 +171,54 @@ function App() {
     setLoading(true)
     setError('')
     setProgress(0)
-    setStatus(online ? 'Connexion au modèle…' : 'Recherche du modèle en cache…')
+    setStatus(modelCached ? 'Chargement du modèle depuis cet appareil…' : online ? 'Téléchargement initial du modèle…' : 'Recherche du modèle en cache…')
     worker.current?.postMessage({ type: 'load' })
   }
 
   const translate = () => {
     if (!input.trim() || !worker.current) return
+    const detectedSource = source === 'auto' ? detectSourceLanguage(input) : undefined
+    const sourceCode = source === 'auto' ? detectedSource?.code : source
+    if (!sourceCode) {
+      setError('Langue source non reconnue automatiquement. Choisissez-la dans le menu « DE ».')
+      return
+    }
+    const text = input.trim()
+    const translationKey = makeTranslationKey(text, sourceCode, target)
+    const cache = readTranslationCache()
+    const cachedTranslation = cache[translationKey]
+    if (cachedTranslation !== undefined) {
+      delete cache[translationKey]
+      cache[translationKey] = cachedTranslation
+      try {
+        localStorage.setItem(TRANSLATION_CACHE_KEY, JSON.stringify(cache))
+      } catch {
+        // A cache hit remains usable if storage becomes unavailable.
+      }
+      setOutput(cachedTranslation)
+      setError('')
+      setTranslationProgress('')
+      setTranslationReused(true)
+      return
+    }
+    if (sourceCode === target) {
+      setOutput(text)
+      setTranslationReused(true)
+      setError('')
+      return
+    }
+    setTranslationReused(false)
     if (!modelReady) {
-      pendingTranslation.current = { text: input.trim(), source, target }
+      pendingTranslation.current = { text, source: sourceCode, target }
       loadModel()
       return
     }
     setTranslating(true)
+    setTranslationProgress('')
     setError('')
-    worker.current.postMessage({ type: 'translate', text: input.trim(), source, target })
+    const request = { text, source: sourceCode, target }
+    activeTranslation.current = request
+    worker.current.postMessage({ type: 'translate', ...request })
   }
 
   const swap = () => {
@@ -154,15 +261,15 @@ function App() {
 
         <section className="translator" aria-label="Traducteur">
           <div className="language-bar">
-            <label className="language-select"><span>DE</span><select value={source} onChange={(event) => setSource(event.target.value)} aria-label="Langue source">{languages.map((language) => <option key={language.code} value={language.code}>{language.name}</option>)}</select><ChevronDown size={15} /></label>
+            <label className="language-select"><span>DE</span><select value={source} onChange={(event) => { setSource(event.target.value); setTranslationReused(false) }} aria-label="Langue source"><option value="auto">Détection automatique</option>{languages.map((language) => <option key={language.code} value={language.code}>{language.name}</option>)}</select><ChevronDown size={15} /></label>
             <button className="swap-button" onClick={swap} title="Inverser les langues" aria-label="Inverser les langues"><ArrowDownUp size={17} /></button>
-            <label className="language-select target-select"><span>VERS</span><select value={target} onChange={(event) => setTarget(event.target.value)} aria-label="Langue cible">{languages.map((language) => <option key={language.code} value={language.code}>{language.name}</option>)}</select><ChevronDown size={15} /></label>
+            <label className="language-select target-select"><span>VERS</span><select value={target} onChange={(event) => { setTarget(event.target.value); setTranslationReused(false) }} aria-label="Langue cible">{languages.map((language) => <option key={language.code} value={language.code}>{language.name}</option>)}</select><ChevronDown size={15} /></label>
             <span className="language-count"><Languages size={14} /> {languages.length} langues</span>
           </div>
 
           <div className="translation-panes">
             <div className="pane input-pane">
-              <textarea value={input} onChange={(event) => setInput(event.target.value)} maxLength={5000} placeholder="Écrivez ou collez votre texte ici…" aria-label="Texte à traduire" />
+              <textarea value={input} onChange={(event) => { setInput(event.target.value); setTranslationReused(false) }} maxLength={5000} placeholder="Écrivez ou collez votre texte ici…" aria-label="Texte à traduire" />
               <div className="pane-footer"><span>{input.length} / 5 000</span><button className="icon-button" onClick={() => { setInput(''); setOutput('') }} disabled={!input} title="Effacer le texte" aria-label="Effacer le texte"><X size={17} /></button></div>
             </div>
             <div className="pane output-pane" aria-live="polite">
@@ -174,18 +281,18 @@ function App() {
           <div className="action-row">
             <div className="model-status">
               <span className={`model-indicator ${modelReady ? 'ready' : loading ? 'busy' : ''}`} />
-              <span>{loading ? status : modelReady ? 'Traduction sur cet appareil' : 'Modèle requis pour démarrer'}</span>
+              <span>{loading ? status : translating ? `Traduction en cours ${translationProgress}` : translationReused ? 'Résultat réutilisé sans recalcul' : modelReady ? 'Moteur chargé en mémoire' : modelCached ? 'Modèle enregistré · hors ligne' : 'Modèle requis pour démarrer'}</span>
             </div>
             <button className="translate-button" onClick={translate} disabled={!input.trim() || translating || loading}>
-              {translating ? <><LoaderCircle className="spin" size={17} /> Traduction…</> : <>{!modelReady && <Languages size={17} />} Traduire <ArrowRight size={17} /></>}
+              {translating ? <><LoaderCircle className="spin" size={17} /> Traduction {translationProgress}</> : translationReused ? <><Check size={17} /> Réutilisée</> : <>{!modelReady && <Languages size={17} />} Traduire <ArrowRight size={17} /></>}
             </button>
           </div>
 
-          <div className={`download-progress ${loading ? '' : 'is-idle'}`} aria-hidden={!loading}><div className="progress-track"><span style={{ width: `${progress}%` }} /></div><span>{progress ? `${progress}%` : 'Préparation'} · le modèle sera conservé sur cet appareil</span></div>
+          <div className={`download-progress ${loading ? '' : 'is-idle'}`} aria-hidden={!loading}><div className="progress-track"><span style={{ width: `${progress}%` }} /></div><span>{modelCached ? 'Chargement du modèle depuis le cache local · aucun nouveau téléchargement' : `${progress ? `${progress}%` : 'Préparation'} · premier téléchargement du modèle`}</span></div>
           {error && <p className="error-message" role="alert">{error}</p>}
         </section>
 
-        <div className="offline-note"><span className="offline-icon">{online ? <Wifi size={16} /> : <WifiOff size={16} />}</span><div className="offline-note-copy"><strong>{modelReady ? 'Prêt pour le hors ligne' : 'Une première étape, ensuite libre'}</strong><p>{modelReady ? 'Le modèle est conservé dans le navigateur. La traduction fonctionne sans envoyer vos textes sur Internet.' : 'Le modèle multilingue (~700 Mo) doit être téléchargé une fois. Ensuite, traduisez hors ligne, sans envoyer vos textes.'}</p></div>{modelReady ? <span className="note-arrow"><Check size={17} /></span> : <button className="download-model-button" onClick={loadModel} disabled={loading} aria-busy={loading}>{loading ? <LoaderCircle className="spin" size={15} /> : <Download size={15} />}{loading ? 'Téléchargement…' : 'Télécharger'}<span>(~700 Mo)</span></button>}</div>
+        <div className="offline-note"><span className="offline-icon">{online ? <Wifi size={16} /> : <WifiOff size={16} />}</span><div className="offline-note-copy"><strong>{modelReady ? 'Prêt pour le hors ligne' : modelCached ? 'Modèle déjà téléchargé' : 'Une première étape, ensuite libre'}</strong><p>{modelReady ? 'Les nouveaux textes sont calculés localement. Les 20 dernières traductions exactes sont enregistrées pour être réutilisées sans calcul.' : modelCached ? 'Le modèle reste dans le cache après fermeture. Il est rechargé depuis l’appareil, sans nouveau téléchargement. Les 20 dernières traductions peuvent être réutilisées sans calcul.' : 'Le modèle multilingue (~900 Mo) est téléchargé une seule fois. Les textes restent sur cet appareil.'}</p></div>{modelReady ? <span className="note-arrow"><Check size={17} /></span> : <button className="download-model-button" onClick={loadModel} disabled={loading} aria-busy={loading}>{loading ? <LoaderCircle className="spin" size={15} /> : modelCached ? <Languages size={15} /> : <Download size={15} />}{loading ? 'Chargement…' : modelCached ? 'Charger hors ligne' : 'Télécharger'}{!modelCached && <span>(~900 Mo)</span>}</button>}</div>
 
         <footer className="page-footer"><span>FAIT POUR LES CONVERSATIONS SANS FRONTIÈRES</span><span className="footer-separator" /><span>TRADUCTION LOCALE · AUCUN TEXTE ENVOYÉ</span></footer>
       </section>
