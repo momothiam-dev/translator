@@ -100,7 +100,7 @@ export async function translateOnline(text: string, source: string, target: stri
   const sourceLanguage = toApiLanguage(source)
   const targetLanguage = toApiLanguage(target)
   if (!sourceLanguage || !targetLanguage) {
-    throw new Error('Cette langue n’est pas disponible en ligne. Choisissez le mode hors ligne pour utiliser le modèle multilingue.')
+    throw new Error('Cette langue n’est pas disponible avec le service en ligne. Essayez une autre langue ou une paire différente.')
   }
 
   const translatedParagraphs: string[] = []
@@ -112,13 +112,13 @@ export async function translateOnline(text: string, source: string, target: stri
       try {
         response = await fetch(`https://api.mymemory.translated.net/get?${params}`, { signal: AbortSignal.timeout(20_000) })
       } catch {
-        throw new Error('Le service en ligne ne répond pas. Vérifiez votre connexion ou passez en mode hors ligne.')
+        throw new Error('Le service en ligne ne répond pas. Vérifiez votre connexion puis réessayez.')
       }
 
-      if (!response.ok) throw new Error(`Le service en ligne a répondu avec l’erreur ${response.status}. Réessayez plus tard ou passez en mode hors ligne.`)
+      if (!response.ok) throw new Error(`Le service en ligne a répondu avec l’erreur ${response.status}. Réessayez plus tard.`)
       const result = await response.json() as MyMemoryResponse
       if (result.quotaFinished || result.responseStatus === 429) {
-        throw new Error('La limite gratuite du service en ligne est atteinte (5 000 caractères par jour). Passez en mode hors ligne ou réessayez demain.')
+        throw new Error('La limite gratuite du service en ligne est atteinte (5 000 caractères par jour). Réessayez demain.')
       }
       if (result.responseStatus !== 200 || !result.responseData?.translatedText) {
         throw new Error(result.responseDetails || 'Aucune proposition disponible pour cette phrase. Reformulez-la ou réessayez plus tard.')
