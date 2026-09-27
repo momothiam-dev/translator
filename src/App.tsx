@@ -1,13 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
-import { ArrowDownUp, ArrowRight, Check, ChevronDown, Clipboard, Download, Languages, LoaderCircle, Wifi, WifiOff, X } from 'lucide-react'
-import { franc } from 'franc-min'
+import { ArrowDownUp, ArrowRight, Check, ChevronDown, Clipboard, Download, Languages, LoaderCircle, RefreshCw, Wifi, WifiOff, X } from 'lucide-react'
+import { francAll } from 'franc-min'
 import { nllbLanguages, type Language } from './languages'
 
 type ModelProgress = { status?: string; file?: string; progress?: number; loaded?: number; total?: number }
 type WorkerMessage = { type: string; progress?: ModelProgress; text?: string; message?: string; completed?: number; total?: number }
 const MODEL_CACHE_KEY = 'parlotte:nllb-model-cached:v1'
-const TRANSLATION_CACHE_KEY = 'parlotte:translations:v1'
+const TRANSLATION_CACHE_KEY = 'parlotte:translations:v2'
 const MAX_CACHED_TRANSLATIONS = 20
+const MIN_AUTO_DETECT_LENGTH = 20
+const MIN_AUTO_DETECT_MARGIN = 0.12
 const detectedLanguageAliases: Record<string, string> = { cmn: 'zho_Hans', zlm: 'zsm_Latn' }
 
 const featuredLanguages: Language[] = [
@@ -44,7 +46,11 @@ for (const language of [...nllbLanguages, ...featuredLanguages]) languageMap.set
 const languages = [...languageMap.values()].sort((left, right) => left.name.localeCompare(right.name, 'fr'))
 
 function detectSourceLanguage(text: string): Language | undefined {
-  const detectedCode = franc(text, { minLength: 10 })
+  if (text.trim().length < MIN_AUTO_DETECT_LENGTH) return undefined
+  const candidates = francAll(text, { minLength: MIN_AUTO_DETECT_LENGTH })
+  const [best, second] = candidates
+  if (!best || (second && best[1] - second[1] < MIN_AUTO_DETECT_MARGIN)) return undefined
+  const detectedCode = best[0]
   if (detectedCode === 'und') return undefined
   const nllbCode = detectedLanguageAliases[detectedCode]
     ?? nllbLanguages.find((language) => language.code.startsWith(`${detectedCode}_`))?.code
@@ -68,6 +74,7 @@ function App() {
   const worker = useRef<Worker | null>(null)
   const pendingTranslation = useRef<{ text: string; source: string; target: string } | null>(null)
   const activeTranslation = useRef<{ text: string; source: string; target: string } | null>(null)
+  const modelCachedRef = useRef(localStorage.getItem(MODEL_CACHE_KEY) === '1')
   const [source, setSource] = useState('auto')
   const [target, setTarget] = useState('fra_Latn')
   const [input, setInput] = useState('')
@@ -92,11 +99,12 @@ function App() {
       if (message.type === 'progress') {
         const detail = message.progress
         if (detail?.status === 'progress' && typeof detail.progress === 'number') setProgress(Math.round(detail.progress))
-        if (detail?.status === 'downloading') setStatus(modelCached ? 'Chargement du modèle enregistré…' : 'Téléchargement initial du modèle…')
+        if (detail?.status === 'downloading') setStatus(modelCachedRef.current ? 'Chargement du modèle enregistré…' : 'Téléchargement initial du modèle…')
         if (detail?.status === 'ready') setStatus('Préparation du modèle…')
       } else if (message.type === 'ready') {
         setModelReady(true)
         setModelCached(true)
+        modelCachedRef.current = true
         localStorage.setItem(MODEL_CACHE_KEY, '1')
         if (navigator.storage?.persist) void navigator.storage.persist().catch(() => false)
         setLoading(false)
@@ -175,7 +183,7 @@ function App() {
     worker.current?.postMessage({ type: 'load' })
   }
 
-  const translate = () => {
+  const translate = (forceRecalculation = false) => {
     if (!input.trim() || !worker.current) return
     const detectedSource = source === 'auto' ? detectSourceLanguage(input) : undefined
     const sourceCode = source === 'auto' ? detectedSource?.code : source
@@ -183,11 +191,12 @@ function App() {
       setError('Langue source non reconnue automatiquement. Choisissez-la dans le menu « DE ».')
       return
     }
+    if (source === 'auto' && detectedSource) setSource(detectedSource.code)
     const text = input.trim()
     const translationKey = makeTranslationKey(text, sourceCode, target)
     const cache = readTranslationCache()
     const cachedTranslation = cache[translationKey]
-    if (cachedTranslation !== undefined) {
+    if (!forceRecalculation && cachedTranslation !== undefined) {
       delete cache[translationKey]
       cache[translationKey] = cachedTranslation
       try {
@@ -219,6 +228,12 @@ function App() {
     const request = { text, source: sourceCode, target }
     activeTranslation.current = request
     worker.current.postMessage({ type: 'translate', ...request })
+  }
+
+  const recalculateTranslation = () => {
+    setTranslationReused(false)
+    setOutput('')
+    translate(true)
   }
 
   const swap = () => {
@@ -274,7 +289,7 @@ function App() {
             </div>
             <div className="pane output-pane" aria-live="polite">
               {output ? <p className="translated-text">{output}</p> : <div className="output-placeholder"><span className="placeholder-icon"><ArrowRight size={17} /></span><span>Votre traduction<br />apparaîtra ici</span></div>}
-              <div className="pane-footer"><span>{output ? `${output.length} caractères` : languageName(target)}</span><button className="icon-button" onClick={copyOutput} disabled={!output} title="Copier la traduction" aria-label="Copier la traduction">{copied ? <Check size={17} /> : <Clipboard size={17} />}</button></div>
+              <div className="pane-footer"><span>{output ? `${output.length} caractères` : languageName(target)}</span><div className="output-actions"><button className="icon-button" onClick={recalculateTranslation} disabled={!output || translating || loading} title="Recalculer la traduction" aria-label="Recalculer la traduction"><RefreshCw size={16} /></button><button className="icon-button" onClick={copyOutput} disabled={!output} title="Copier la traduction" aria-label="Copier la traduction">{copied ? <Check size={17} /> : <Clipboard size={17} />}</button></div></div>
             </div>
           </div>
 
@@ -283,7 +298,7 @@ function App() {
               <span className={`model-indicator ${modelReady ? 'ready' : loading ? 'busy' : ''}`} />
               <span>{loading ? status : translating ? `Traduction en cours ${translationProgress}` : translationReused ? 'Résultat réutilisé sans recalcul' : modelReady ? 'Moteur chargé en mémoire' : modelCached ? 'Modèle enregistré · hors ligne' : 'Modèle requis pour démarrer'}</span>
             </div>
-            <button className="translate-button" onClick={translate} disabled={!input.trim() || translating || loading}>
+            <button className="translate-button" onClick={() => translate()} disabled={!input.trim() || translating || loading}>
               {translating ? <><LoaderCircle className="spin" size={17} /> Traduction {translationProgress}</> : translationReused ? <><Check size={17} /> Réutilisée</> : <>{!modelReady && <Languages size={17} />} Traduire <ArrowRight size={17} /></>}
             </button>
           </div>

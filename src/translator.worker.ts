@@ -12,9 +12,7 @@ const loadPipeline = pipeline as unknown as (task: 'translation', model: string,
 let translator: Translator | null = null
 let loadPromise: Promise<Translator> | null = null
 let operationQueue = Promise.resolve()
-let idleUnloadTimer: ReturnType<typeof setTimeout> | undefined
 const MAX_CHUNK_LENGTH = 420
-const IDLE_UNLOAD_DELAY = 30_000
 
 type WorkerRequest = { type: 'load' | 'unload' | 'translate'; text?: string; source?: string; target?: string }
 
@@ -59,8 +57,6 @@ async function ensureTranslator(): Promise<Translator> {
 }
 
 async function unloadTranslator(): Promise<void> {
-  clearTimeout(idleUnloadTimer)
-  idleUnloadTimer = undefined
   if (loadPromise) await loadPromise
   if (translator) {
     await translator.dispose()
@@ -69,19 +65,9 @@ async function unloadTranslator(): Promise<void> {
   self.postMessage({ type: 'unloaded' })
 }
 
-function scheduleIdleUnload(): void {
-  clearTimeout(idleUnloadTimer)
-  idleUnloadTimer = setTimeout(() => {
-    operationQueue = operationQueue.then(unloadTranslator).catch((error: unknown) => {
-      self.postMessage({ type: 'error', message: error instanceof Error ? error.message : 'Impossible de libérer la mémoire.' })
-    })
-  }, IDLE_UNLOAD_DELAY)
-}
-
 async function handleMessage(message: WorkerRequest): Promise<void> {
   try {
     if (message.type === 'load') {
-      clearTimeout(idleUnloadTimer)
       translator = await ensureTranslator()
       self.postMessage({ type: 'ready' })
       return
@@ -93,7 +79,6 @@ async function handleMessage(message: WorkerRequest): Promise<void> {
     }
 
     if (message.type === 'translate' && message.text && message.source && message.target) {
-      clearTimeout(idleUnloadTimer)
       const loadedTranslator = await ensureTranslator()
       const paragraphChunks = splitText(message.text)
       const totalChunks = paragraphChunks.reduce((total, paragraph) => total + paragraph.length, 0)
@@ -118,7 +103,7 @@ async function handleMessage(message: WorkerRequest): Promise<void> {
       }
 
       self.postMessage({ type: 'translated', text: translatedParagraphs.join('\n\n') })
-      scheduleIdleUnload()
+  await unloadTranslator()
     }
   } catch (error) {
     self.postMessage({ type: 'error', message: error instanceof Error ? error.message : 'Une erreur inattendue est survenue.' })
