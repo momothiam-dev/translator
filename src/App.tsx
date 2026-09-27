@@ -181,7 +181,7 @@ function App() {
             </button>
           </div>
 
-          {loading && <div className="download-progress"><div className="progress-track"><span style={{ width: `${progress}%` }} /></div><span>{progress ? `${progress}%` : 'Préparation'} · le modèle sera conservé sur cet appareil</span></div>}
+          <div className={`download-progress ${loading ? '' : 'is-idle'}`} aria-hidden={!loading}><div className="progress-track"><span style={{ width: `${progress}%` }} /></div><span>{progress ? `${progress}%` : 'Préparation'} · le modèle sera conservé sur cet appareil</span></div>
           {error && <p className="error-message" role="alert">{error}</p>}
         </section>
 
