@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ArrowDownUp, ArrowRight, Check, ChevronDown, Clipboard, Cloud, LoaderCircle, RefreshCw, Smartphone, X } from 'lucide-react'
 import { nllbLanguages, type Language } from './languages'
 import { translateOnline } from './onlineTranslator'
@@ -70,7 +70,6 @@ function App() {
   const [source, setSource] = useState('auto')
   const [target, setTarget] = useState('fra_Latn')
   const [mode, setMode] = useState<TranslationMode>('online')
-  const [deviceTranslationAvailable, setDeviceTranslationAvailable] = useState(false)
   const [input, setInput] = useState('')
   const [output, setOutput] = useState('')
   const [translating, setTranslating] = useState(false)
@@ -79,15 +78,61 @@ function App() {
   const [error, setError] = useState('')
   const [copied, setCopied] = useState(false)
   const [online, setOnline] = useState(navigator.onLine)
+  const [isBrowserNative, setIsBrowserNative] = useState(false)
+  const [modelReady, setModelReady] = useState(false)
+  
+  const worker = useRef<Worker | null>(null)
+  const pendingTranslation = useRef<{ text: string; source: string; target: string; key: string } | null>(null)
 
   useEffect(() => {
     const updateConnection = () => setOnline(navigator.onLine)
-    setDeviceTranslationAvailable(browserTranslationAvailable())
-    void caches.delete('transformers-cache')
-    localStorage.removeItem('parlotte:nllb-model-cached:v1')
+    const nativeAvailable = browserTranslationAvailable()
+    setIsBrowserNative(nativeAvailable)
+    
+    if (!nativeAvailable) {
+      const instance = new Worker(new URL('./translator.worker.ts', import.meta.url), { type: 'module' })
+      worker.current = instance
+      instance.addEventListener('message', (event: MessageEvent<any>) => {
+        const message = event.data
+        if (message.type === 'progress') {
+          const detail = message.progress
+          if (detail?.status === 'progress' && typeof detail.progress === 'number') setTranslationProgress(`Téléchargement ${Math.round(detail.progress)}%`)
+          if (detail?.status === 'downloading') setTranslationProgress('Téléchargement du modèle…')
+          if (detail?.status === 'ready') setTranslationProgress('Préparation du modèle…')
+        } else if (message.type === 'translation-progress') {
+           setTranslationProgress(`Traduction ${Math.round((message.completed / message.total) * 100)}%`)
+        } else if (message.type === 'ready') {
+          setModelReady(true)
+          setTranslationProgress('')
+          if (pendingTranslation.current) {
+            worker.current?.postMessage({ type: 'translate', ...pendingTranslation.current })
+            setTranslating(true)
+          }
+        } else if (message.type === 'translated') {
+          setOutput(message.text ?? '')
+          setTranslating(false)
+          setError('')
+          if (pendingTranslation.current) {
+            storeTranslation(pendingTranslation.current.key, message.text ?? '')
+            pendingTranslation.current = null
+          }
+          setTranslationProgress('')
+        } else if (message.type === 'error') {
+          setError(message.message ?? 'Impossible de charger le modèle.')
+          pendingTranslation.current = null
+          setTranslating(false)
+          setTranslationProgress('')
+        }
+      })
+    } else {
+      void caches.delete('transformers-cache')
+      localStorage.removeItem('parlotte:nllb-model-cached:v1')
+    }
+    
     window.addEventListener('online', updateConnection)
     window.addEventListener('offline', updateConnection)
     return () => {
+      worker.current?.terminate()
       window.removeEventListener('online', updateConnection)
       window.removeEventListener('offline', updateConnection)
     }
@@ -121,21 +166,45 @@ function App() {
       return
     }
 
-    setTranslating(true)
     setTranslationReused(false)
     setOutput('')
     setError('')
-    try {
-      const result = mode === 'online'
-        ? await translateOnline(text, source, target)
-        : await translateInBrowser(text, source, target, (progress) => setTranslationProgress(`Pack de langue ${progress}%`))
-      setOutput(result)
-      storeTranslation(key, result)
-    } catch (translationError) {
-      setError(translationError instanceof Error ? translationError.message : 'La traduction en ligne a échoué. Réessayez.')
-    } finally {
-      setTranslating(false)
-      setTranslationProgress('')
+    
+    if (mode === 'online') {
+      setTranslating(true)
+      try {
+        const result = await translateOnline(text, source, target)
+        setOutput(result)
+        storeTranslation(key, result)
+      } catch (translationError) {
+        setError(translationError instanceof Error ? translationError.message : 'La traduction en ligne a échoué. Réessayez.')
+      } finally {
+        setTranslating(false)
+        setTranslationProgress('')
+      }
+    } else {
+      if (isBrowserNative) {
+        setTranslating(true)
+        try {
+          const result = await translateInBrowser(text, source, target, (progress) => setTranslationProgress(`Pack de langue ${progress}%`))
+          setOutput(result)
+          storeTranslation(key, result)
+        } catch (translationError) {
+          setError(translationError instanceof Error ? translationError.message : 'La traduction a échoué. Réessayez.')
+        } finally {
+          setTranslating(false)
+          setTranslationProgress('')
+        }
+      } else {
+        // Fallback to Transformers.js worker
+        pendingTranslation.current = { text, source, target, key }
+        setTranslating(true)
+        if (!modelReady) {
+          worker.current?.postMessage({ type: 'load' })
+        } else {
+          worker.current?.postMessage({ type: 'translate', text, source, target })
+        }
+      }
     }
   }
 
@@ -180,19 +249,19 @@ function App() {
         <div className="intro">
           <div className="eyebrow"><span /> TRADUCTION SANS CONTRÔLE AUDIO</div>
           <h1>Les mots voyagent.<br /><em>En ligne ou ici.</em></h1>
-          <p>{mode === 'online' ? 'Traduction en ligne, compatible avec tous les appareils.' : 'Le navigateur gère le pack de langue sur les appareils compatibles.'}</p>
+          <p>{mode === 'online' ? 'Traduction en ligne, compatible avec tous les appareils.' : 'Traduction hors ligne sécurisée, effectuée sur votre appareil.'}</p>
         </div>
 
         <section className="translator" aria-label="Traducteur">
           <div className="mode-bar" role="group" aria-label="Mode de traduction">
             <button className={`mode-option ${mode === 'online' ? 'selected' : ''}`} onClick={() => { setMode('online'); setError(''); setTranslationReused(false) }} aria-pressed={mode === 'online'}><Cloud size={16} /> En ligne</button>
-            <button className={`mode-option ${mode === 'device' ? 'selected' : ''}`} onClick={() => { setMode('device'); setError(''); setTranslationReused(false) }} disabled={!deviceTranslationAvailable} title={!deviceTranslationAvailable ? 'Cette fonction n’est pas proposée par ce navigateur' : 'Traduire avec le moteur du navigateur'} aria-pressed={mode === 'device'}><Smartphone size={16} /> Sur cet appareil</button>
+            <button className={`mode-option ${mode === 'device' ? 'selected' : ''}`} onClick={() => { setMode('device'); setError(''); setTranslationReused(false) }} aria-pressed={mode === 'device'}><Smartphone size={16} /> Sur cet appareil</button>
           </div>
           <div className="language-bar">
             <label className="language-select"><span>DE</span><select value={source} onChange={(event) => { setSource(event.target.value); setTranslationReused(false); setOutput('') }} aria-label="Langue source"><option value="auto">Détection automatique</option>{languages.map((language) => <option key={language.code} value={language.code}>{language.name}</option>)}</select><ChevronDown size={15} /></label>
             <button className="swap-button" onClick={swap} disabled={source === 'auto'} title="Inverser les langues" aria-label="Inverser les langues"><ArrowDownUp size={17} /></button>
             <label className="language-select target-select"><span>VERS</span><select value={target} onChange={(event) => { setTarget(event.target.value); setTranslationReused(false); setOutput('') }} aria-label="Langue cible">{languages.map((language) => <option key={language.code} value={language.code}>{language.name}</option>)}</select><ChevronDown size={15} /></label>
-            <span className="language-count">{mode === 'online' ? <Cloud size={14} /> : <Smartphone size={14} />}{mode === 'online' ? 'En ligne' : 'Navigateur'}</span>
+            <span className="language-count">{mode === 'online' ? <Cloud size={14} /> : <Smartphone size={14} />}{mode === 'online' ? 'En ligne' : isBrowserNative ? 'Moteur natif' : 'Modèle web'}</span>
           </div>
 
           <div className="translation-panes">
@@ -209,21 +278,22 @@ function App() {
           <div className="action-row">
             <div className="model-status">
               <span className={`model-indicator ${translating ? 'busy' : online ? 'ready' : ''}`} />
-              <span>{translating ? translationProgress || (mode === 'online' ? 'Requête en ligne…' : 'Traduction sur cet appareil…') : translationReused ? 'Résultat réutilisé sans requête' : mode === 'online' ? online ? 'Service en ligne prêt' : 'Connexion Internet requise' : deviceTranslationAvailable ? 'Moteur géré par le navigateur' : 'Non pris en charge sur cet appareil'}</span>
+              <span>{translating ? translationProgress || (mode === 'online' ? 'Requête en ligne…' : 'Traduction sur cet appareil…') : translationReused ? 'Résultat réutilisé sans requête' : mode === 'online' ? online ? 'Service en ligne prêt' : 'Connexion Internet requise' : isBrowserNative ? 'Moteur géré par le navigateur' : modelReady ? 'Modèle web prêt' : 'Modèle web (téléchargement requis)'}</span>
             </div>
-            <button className="translate-button" onClick={() => void translate()} disabled={!input.trim() || translating || (mode === 'online' && !online) || (mode === 'device' && !deviceTranslationAvailable)}>
+            <button className="translate-button" onClick={() => void translate()} disabled={!input.trim() || translating || (mode === 'online' && !online)}>
               {translating ? <><LoaderCircle className="spin" size={17} /> Traduction…</> : translationReused ? <><Check size={17} /> Réutilisée</> : <>Traduire <ArrowRight size={17} /></>}
             </button>
           </div>
           {error && <p className="error-message" role="alert">{error}</p>}
         </section>
 
-        <div className="offline-note"><span className="offline-icon">{mode === 'online' ? <Cloud size={16} /> : <Smartphone size={16} />}</span><div className="offline-note-copy"><strong>{mode === 'online' ? 'Mode compatible avec tous les appareils' : 'Mode fourni par le navigateur'}</strong><p>{mode === 'online' ? 'Le texte est envoyé à MyMemory, qui indique pouvoir conserver les segments. Quota gratuit anonyme : 5 000 caractères par jour.' : deviceTranslationAvailable ? 'Le navigateur gère lui-même le pack de langue. Disponible sur certains navigateurs de bureau uniquement ; mobile Android et Safari utilisent le mode en ligne.' : 'Ce navigateur ne propose pas de traduction locale. Revenez à En ligne. Aucun modèle lourd n’est chargé par le site.'}</p></div><span className="note-arrow">{mode === 'online' ? <Check size={17} /> : <Smartphone size={17} />}</span></div>
+        <div className="offline-note"><span className="offline-icon">{mode === 'online' ? <Cloud size={16} /> : <Smartphone size={16} />}</span><div className="offline-note-copy"><strong>{mode === 'online' ? 'Mode compatible avec tous les appareils' : isBrowserNative ? 'Mode fourni par le navigateur' : 'Mode web complet'}</strong><p>{mode === 'online' ? 'Le texte est envoyé à MyMemory, qui indique pouvoir conserver les segments. Quota gratuit anonyme : 5 000 caractères par jour.' : isBrowserNative ? 'Le navigateur gère lui-même le pack de langue sans modèle lourd supplémentaire.' : 'Votre navigateur n\'intègre pas d\'API de traduction native. Un modèle multilingue lourd (~700 Mo) sera téléchargé la première fois pour fonctionner hors ligne sur ce navigateur.'}</p></div><span className="note-arrow">{mode === 'online' ? <Check size={17} /> : <Smartphone size={17} />}</span></div>
 
-        <footer className="page-footer"><span>AUCUN ACCÈS À L’AUDIO</span><span className="footer-separator" /><span>{mode === 'online' ? 'COMPATIBLE WEB ET MOBILE' : 'MOTEUR FOURNI PAR LE NAVIGATEUR'}</span></footer>
+        <footer className="page-footer"><span>AUCUN ACCÈS À L’AUDIO</span><span className="footer-separator" /><span>{mode === 'online' ? 'COMPATIBLE WEB ET MOBILE' : 'MOTEUR LOCAL'}</span></footer>
       </section>
     </main>
   )
 }
 
 export default App
+
