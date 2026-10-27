@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'react'
 import { ArrowDownUp, ArrowRight, Check, ChevronDown, Clipboard, Cloud, LoaderCircle, RefreshCw, Smartphone, X } from 'lucide-react'
 import { nllbLanguages, type Language } from './languages'
 import { translateOnline } from './onlineTranslator'
-import { browserTranslationAvailable, translateInBrowser } from './browserTranslator'
 
 type TranslationCache = Record<string, string>
 type TranslationMode = 'online' | 'device'
@@ -53,7 +52,9 @@ function readTranslationCache(): TranslationCache {
 }
 
 function translationKey(text: string, source: string, target: string, mode: TranslationMode): string {
-  return JSON.stringify([mode, source, target, text])
+  return JSON.stringify(mode === 'device'
+    ? [mode, source, target, text, 'nllb-v1']
+    : [mode, source, target, text])
 }
 
 function storeTranslation(key: string, value: string): void {
@@ -78,17 +79,13 @@ function App() {
   const [error, setError] = useState('')
   const [copied, setCopied] = useState(false)
   const [online, setOnline] = useState(navigator.onLine)
-  const [isBrowserNative, setIsBrowserNative] = useState(false)
   const [modelReady, setModelReady] = useState(false)
-  const [usingModelFallback, setUsingModelFallback] = useState(false)
   
   const worker = useRef<Worker | null>(null)
-  const pendingTranslation = useRef<{ text: string; source: string; target: string; key: string; fallbackReason?: string } | null>(null)
+  const pendingTranslation = useRef<{ text: string; source: string; target: string; key: string } | null>(null)
 
   useEffect(() => {
     const updateConnection = () => setOnline(navigator.onLine)
-    const nativeAvailable = browserTranslationAvailable()
-    setIsBrowserNative(nativeAvailable)
     
     const instance = new Worker(new URL('./translator.worker.ts', import.meta.url), { type: 'module' })
     worker.current = instance
@@ -118,9 +115,7 @@ function App() {
         }
         setTranslationProgress('')
       } else if (message.type === 'error') {
-        const fallbackReason = pendingTranslation.current?.fallbackReason
-        const modelError = message.message ?? 'Impossible de charger le modèle.'
-        setError(fallbackReason ? `${fallbackReason} Le moteur local n’a pas pu prendre le relais : ${modelError}` : modelError)
+        setError(message.message ?? 'Impossible de charger le modèle.')
         pendingTranslation.current = null
         setTranslating(false)
         setTranslationProgress('')
@@ -181,27 +176,8 @@ function App() {
         setTranslationProgress('')
       }
     } else {
-      if (isBrowserNative) {
-        setTranslating(true)
-        try {
-          const result = await translateInBrowser(text, source, target, (progress) => setTranslationProgress(`Pack de langue ${progress}%`))
-          setOutput(result)
-          storeTranslation(key, result)
-          setUsingModelFallback(false)
-          setTranslating(false)
-          setTranslationProgress('')
-          return
-        } catch (translationError) {
-          const fallbackReason = translationError instanceof Error ? translationError.message : 'Le traducteur du navigateur a échoué.'
-          pendingTranslation.current = { text, source, target, key, fallbackReason }
-          setUsingModelFallback(true)
-          setTranslationProgress('Passage au moteur local…')
-        }
-      } else {
-        pendingTranslation.current = { text, source, target, key }
-        setTranslating(true)
-      }
-
+      pendingTranslation.current = { text, source, target, key }
+      setTranslating(true)
       if (!modelReady) {
         worker.current?.postMessage({ type: 'load' })
       } else {
@@ -212,8 +188,6 @@ function App() {
         setTranslating(false)
         setTranslationProgress('')
         setError('Le moteur local ne peut pas être démarré dans ce navigateur.')
-      } else if (!modelReady && !isBrowserNative) {
-        setTranslating(true)
       }
     }
   }
@@ -271,7 +245,7 @@ function App() {
             <label className="language-select"><span>DE</span><select value={source} onChange={(event) => { setSource(event.target.value); setTranslationReused(false); setOutput('') }} aria-label="Langue source"><option value="auto">Détection automatique</option>{languages.map((language) => <option key={language.code} value={language.code}>{language.name}</option>)}</select><ChevronDown size={15} /></label>
             <button className="swap-button" onClick={swap} disabled={source === 'auto'} title="Inverser les langues" aria-label="Inverser les langues"><ArrowDownUp size={17} /></button>
             <label className="language-select target-select"><span>VERS</span><select value={target} onChange={(event) => { setTarget(event.target.value); setTranslationReused(false); setOutput('') }} aria-label="Langue cible">{languages.map((language) => <option key={language.code} value={language.code}>{language.name}</option>)}</select><ChevronDown size={15} /></label>
-            <span className="language-count">{mode === 'online' ? <Cloud size={14} /> : <Smartphone size={14} />}{mode === 'online' ? 'En ligne' : isBrowserNative ? 'Moteur natif' : 'Modèle web'}</span>
+            <span className="language-count">{mode === 'online' ? <Cloud size={14} /> : <Smartphone size={14} />}{mode === 'online' ? 'En ligne' : 'Modèle local'}</span>
           </div>
 
           <div className="translation-panes">
@@ -288,7 +262,7 @@ function App() {
           <div className="action-row">
             <div className="model-status">
               <span className={`model-indicator ${translating ? 'busy' : online ? 'ready' : ''}`} />
-              <span>{translating ? translationProgress || (mode === 'online' ? 'Requête en ligne…' : 'Traduction sur cet appareil…') : translationReused ? 'Résultat réutilisé sans requête' : mode === 'online' ? online ? 'Service en ligne prêt' : 'Connexion Internet requise' : isBrowserNative && !usingModelFallback ? 'Moteur géré par le navigateur' : modelReady ? 'Modèle web prêt' : 'Modèle web (téléchargement requis)'}</span>
+              <span>{translating ? translationProgress || (mode === 'online' ? 'Requête en ligne…' : 'Traduction sur cet appareil…') : translationReused ? 'Résultat réutilisé sans requête' : mode === 'online' ? online ? 'Service en ligne prêt' : 'Connexion Internet requise' : modelReady ? 'Modèle local prêt' : 'Modèle local (téléchargement requis)'}</span>
             </div>
             <button className="translate-button" onClick={() => void translate()} disabled={!input.trim() || translating || (mode === 'online' && !online)}>
               {translating ? <><LoaderCircle className="spin" size={17} /> Traduction…</> : translationReused ? <><Check size={17} /> Réutilisée</> : <>Traduire <ArrowRight size={17} /></>}
@@ -297,7 +271,7 @@ function App() {
           {error && <p className="error-message" role="alert">{error}</p>}
         </section>
 
-        <div className="offline-note"><span className="offline-icon">{mode === 'online' ? <Cloud size={16} /> : <Smartphone size={16} />}</span><div className="offline-note-copy"><strong>{mode === 'online' ? 'Mode compatible avec tous les appareils' : isBrowserNative ? 'Mode fourni par le navigateur' : 'Mode web complet'}</strong><p>{mode === 'online' ? 'Le texte est envoyé à MyMemory, qui indique pouvoir conserver les segments. Quota gratuit anonyme : 5 000 caractères par jour.' : isBrowserNative ? 'Le navigateur traduit en priorité. Si la paire de langues n’est pas disponible, un moteur local prend le relais (téléchargement initial d’environ 700 Mo, connexion requise).' : 'Votre navigateur n’intègre pas d’API de traduction native. Un modèle multilingue lourd (~700 Mo) sera téléchargé la première fois ; une fois en cache, il peut fonctionner hors ligne sur cet appareil.'}</p></div><span className="note-arrow">{mode === 'online' ? <Check size={17} /> : <Smartphone size={17} />}</span></div>
+        <div className="offline-note"><span className="offline-icon">{mode === 'online' ? <Cloud size={16} /> : <Smartphone size={16} />}</span><div className="offline-note-copy"><strong>{mode === 'online' ? 'Mode compatible avec tous les appareils' : 'Traduction par modèle local'}</strong><p>{mode === 'online' ? 'Le texte est envoyé à MyMemory, qui indique pouvoir conserver les segments. Quota gratuit anonyme : 5 000 caractères par jour.' : 'Un modèle multilingue lourd (~700 Mo) doit être téléchargé la première fois avec une connexion Internet. Une fois en cache sur cet appareil, il peut traduire hors ligne sans envoyer votre texte.'}</p></div><span className="note-arrow">{mode === 'online' ? <Check size={17} /> : <Smartphone size={17} />}</span></div>
 
         <footer className="page-footer"><span>AUCUN ACCÈS À L’AUDIO</span><span className="footer-separator" /><span>{mode === 'online' ? 'COMPATIBLE WEB ET MOBILE' : 'MOTEUR LOCAL'}</span></footer>
       </section>
