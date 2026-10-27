@@ -1,4 +1,5 @@
 import { env, pipeline } from '@xenova/transformers'
+import { normalizeTranslationInput } from './translationText'
 
 env.allowLocalModels = false
 env.useBrowserCache = true
@@ -66,7 +67,7 @@ async function handleMessage(message: WorkerRequest): Promise<void> {
 
     if (message.type === 'translate' && message.text && message.source && message.target) {
       const loadedTranslator = await ensureTranslator()
-      const paragraphChunks = splitText(message.text)
+      const paragraphChunks = splitText(normalizeTranslationInput(message.text, message.source))
       const totalChunks = paragraphChunks.reduce((total, paragraph) => total + paragraph.length, 0)
       let completedChunks = 0
       const translatedParagraphs: string[] = []

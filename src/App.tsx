@@ -53,7 +53,7 @@ function readTranslationCache(): TranslationCache {
 
 function translationKey(text: string, source: string, target: string, mode: TranslationMode): string {
   return JSON.stringify(mode === 'device'
-    ? [mode, source, target, text, 'nllb-v1']
+    ? [mode, source, target, text, 'nllb-v2']
     : [mode, source, target, text])
 }
 
