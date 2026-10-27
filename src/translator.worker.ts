@@ -14,7 +14,7 @@ let loadPromise: Promise<Translator> | null = null
 let operationQueue = Promise.resolve()
 const MAX_CHUNK_LENGTH = 420
 
-type WorkerRequest = { type: 'load' | 'unload' | 'translate'; text?: string; source?: string; target?: string }
+type WorkerRequest = { type: 'load' | 'translate'; text?: string; source?: string; target?: string }
 
 function splitParagraph(paragraph: string): string[] {
   const sentences = paragraph.match(/[^.!?。！？]+(?:[.!?。！？]+|$)/gu) ?? [paragraph]
@@ -56,25 +56,11 @@ async function ensureTranslator(): Promise<Translator> {
   return loadPromise
 }
 
-async function unloadTranslator(): Promise<void> {
-  if (loadPromise) await loadPromise
-  if (translator) {
-    await translator.dispose()
-    translator = null
-  }
-  self.postMessage({ type: 'unloaded' })
-}
-
 async function handleMessage(message: WorkerRequest): Promise<void> {
   try {
     if (message.type === 'load') {
       translator = await ensureTranslator()
       self.postMessage({ type: 'ready' })
-      return
-    }
-
-    if (message.type === 'unload') {
-      await unloadTranslator()
       return
     }
 
@@ -103,7 +89,6 @@ async function handleMessage(message: WorkerRequest): Promise<void> {
       }
 
       self.postMessage({ type: 'translated', text: translatedParagraphs.join('\n\n') })
-  await unloadTranslator()
     }
   } catch (error) {
     self.postMessage({ type: 'error', message: error instanceof Error ? error.message : 'Une erreur inattendue est survenue.' })

@@ -80,54 +80,52 @@ function App() {
   const [online, setOnline] = useState(navigator.onLine)
   const [isBrowserNative, setIsBrowserNative] = useState(false)
   const [modelReady, setModelReady] = useState(false)
+  const [usingModelFallback, setUsingModelFallback] = useState(false)
   
   const worker = useRef<Worker | null>(null)
-  const pendingTranslation = useRef<{ text: string; source: string; target: string; key: string } | null>(null)
+  const pendingTranslation = useRef<{ text: string; source: string; target: string; key: string; fallbackReason?: string } | null>(null)
 
   useEffect(() => {
     const updateConnection = () => setOnline(navigator.onLine)
     const nativeAvailable = browserTranslationAvailable()
     setIsBrowserNative(nativeAvailable)
     
-    if (!nativeAvailable) {
-      const instance = new Worker(new URL('./translator.worker.ts', import.meta.url), { type: 'module' })
-      worker.current = instance
-      instance.addEventListener('message', (event: MessageEvent<any>) => {
-        const message = event.data
-        if (message.type === 'progress') {
-          const detail = message.progress
-          if (detail?.status === 'progress' && typeof detail.progress === 'number') setTranslationProgress(`Téléchargement ${Math.round(detail.progress)}%`)
-          if (detail?.status === 'downloading') setTranslationProgress('Téléchargement du modèle…')
-          if (detail?.status === 'ready') setTranslationProgress('Préparation du modèle…')
-        } else if (message.type === 'translation-progress') {
-           setTranslationProgress(`Traduction ${Math.round((message.completed / message.total) * 100)}%`)
-        } else if (message.type === 'ready') {
-          setModelReady(true)
-          setTranslationProgress('')
-          if (pendingTranslation.current) {
-            worker.current?.postMessage({ type: 'translate', ...pendingTranslation.current })
-            setTranslating(true)
-          }
-        } else if (message.type === 'translated') {
-          setOutput(message.text ?? '')
-          setTranslating(false)
-          setError('')
-          if (pendingTranslation.current) {
-            storeTranslation(pendingTranslation.current.key, message.text ?? '')
-            pendingTranslation.current = null
-          }
-          setTranslationProgress('')
-        } else if (message.type === 'error') {
-          setError(message.message ?? 'Impossible de charger le modèle.')
-          pendingTranslation.current = null
-          setTranslating(false)
-          setTranslationProgress('')
+    const instance = new Worker(new URL('./translator.worker.ts', import.meta.url), { type: 'module' })
+    worker.current = instance
+    instance.addEventListener('message', (event: MessageEvent<any>) => {
+      const message = event.data
+      if (message.type === 'progress') {
+        const detail = message.progress
+        if (detail?.status === 'progress' && typeof detail.progress === 'number') setTranslationProgress(`Téléchargement ${Math.round(detail.progress)}%`)
+        if (detail?.status === 'downloading') setTranslationProgress('Téléchargement du modèle…')
+        if (detail?.status === 'ready') setTranslationProgress('Préparation du modèle…')
+      } else if (message.type === 'translation-progress') {
+        setTranslationProgress(`Traduction ${Math.round((message.completed / message.total) * 100)}%`)
+      } else if (message.type === 'ready') {
+        setModelReady(true)
+        setTranslationProgress('')
+        if (pendingTranslation.current) {
+          worker.current?.postMessage({ type: 'translate', ...pendingTranslation.current })
+          setTranslating(true)
         }
-      })
-    } else {
-      void caches.delete('transformers-cache')
-      localStorage.removeItem('parlotte:nllb-model-cached:v1')
-    }
+      } else if (message.type === 'translated') {
+        setOutput(message.text ?? '')
+        setTranslating(false)
+        setError('')
+        if (pendingTranslation.current) {
+          storeTranslation(pendingTranslation.current.key, message.text ?? '')
+          pendingTranslation.current = null
+        }
+        setTranslationProgress('')
+      } else if (message.type === 'error') {
+        const fallbackReason = pendingTranslation.current?.fallbackReason
+        const modelError = message.message ?? 'Impossible de charger le modèle.'
+        setError(fallbackReason ? `${fallbackReason} Le moteur local n’a pas pu prendre le relais : ${modelError}` : modelError)
+        pendingTranslation.current = null
+        setTranslating(false)
+        setTranslationProgress('')
+      }
+    })
     
     window.addEventListener('online', updateConnection)
     window.addEventListener('offline', updateConnection)
@@ -189,21 +187,33 @@ function App() {
           const result = await translateInBrowser(text, source, target, (progress) => setTranslationProgress(`Pack de langue ${progress}%`))
           setOutput(result)
           storeTranslation(key, result)
-        } catch (translationError) {
-          setError(translationError instanceof Error ? translationError.message : 'La traduction a échoué. Réessayez.')
-        } finally {
+          setUsingModelFallback(false)
           setTranslating(false)
           setTranslationProgress('')
+          return
+        } catch (translationError) {
+          const fallbackReason = translationError instanceof Error ? translationError.message : 'Le traducteur du navigateur a échoué.'
+          pendingTranslation.current = { text, source, target, key, fallbackReason }
+          setUsingModelFallback(true)
+          setTranslationProgress('Passage au moteur local…')
         }
       } else {
-        // Fallback to Transformers.js worker
         pendingTranslation.current = { text, source, target, key }
         setTranslating(true)
-        if (!modelReady) {
-          worker.current?.postMessage({ type: 'load' })
-        } else {
-          worker.current?.postMessage({ type: 'translate', text, source, target })
-        }
+      }
+
+      if (!modelReady) {
+        worker.current?.postMessage({ type: 'load' })
+      } else {
+        worker.current?.postMessage({ type: 'translate', ...pendingTranslation.current })
+      }
+      if (!worker.current) {
+        pendingTranslation.current = null
+        setTranslating(false)
+        setTranslationProgress('')
+        setError('Le moteur local ne peut pas être démarré dans ce navigateur.')
+      } else if (!modelReady && !isBrowserNative) {
+        setTranslating(true)
       }
     }
   }
@@ -278,7 +288,7 @@ function App() {
           <div className="action-row">
             <div className="model-status">
               <span className={`model-indicator ${translating ? 'busy' : online ? 'ready' : ''}`} />
-              <span>{translating ? translationProgress || (mode === 'online' ? 'Requête en ligne…' : 'Traduction sur cet appareil…') : translationReused ? 'Résultat réutilisé sans requête' : mode === 'online' ? online ? 'Service en ligne prêt' : 'Connexion Internet requise' : isBrowserNative ? 'Moteur géré par le navigateur' : modelReady ? 'Modèle web prêt' : 'Modèle web (téléchargement requis)'}</span>
+              <span>{translating ? translationProgress || (mode === 'online' ? 'Requête en ligne…' : 'Traduction sur cet appareil…') : translationReused ? 'Résultat réutilisé sans requête' : mode === 'online' ? online ? 'Service en ligne prêt' : 'Connexion Internet requise' : isBrowserNative && !usingModelFallback ? 'Moteur géré par le navigateur' : modelReady ? 'Modèle web prêt' : 'Modèle web (téléchargement requis)'}</span>
             </div>
             <button className="translate-button" onClick={() => void translate()} disabled={!input.trim() || translating || (mode === 'online' && !online)}>
               {translating ? <><LoaderCircle className="spin" size={17} /> Traduction…</> : translationReused ? <><Check size={17} /> Réutilisée</> : <>Traduire <ArrowRight size={17} /></>}
@@ -287,7 +297,7 @@ function App() {
           {error && <p className="error-message" role="alert">{error}</p>}
         </section>
 
-        <div className="offline-note"><span className="offline-icon">{mode === 'online' ? <Cloud size={16} /> : <Smartphone size={16} />}</span><div className="offline-note-copy"><strong>{mode === 'online' ? 'Mode compatible avec tous les appareils' : isBrowserNative ? 'Mode fourni par le navigateur' : 'Mode web complet'}</strong><p>{mode === 'online' ? 'Le texte est envoyé à MyMemory, qui indique pouvoir conserver les segments. Quota gratuit anonyme : 5 000 caractères par jour.' : isBrowserNative ? 'Le navigateur gère lui-même le pack de langue sans modèle lourd supplémentaire.' : 'Votre navigateur n\'intègre pas d\'API de traduction native. Un modèle multilingue lourd (~700 Mo) sera téléchargé la première fois pour fonctionner hors ligne sur ce navigateur.'}</p></div><span className="note-arrow">{mode === 'online' ? <Check size={17} /> : <Smartphone size={17} />}</span></div>
+        <div className="offline-note"><span className="offline-icon">{mode === 'online' ? <Cloud size={16} /> : <Smartphone size={16} />}</span><div className="offline-note-copy"><strong>{mode === 'online' ? 'Mode compatible avec tous les appareils' : isBrowserNative ? 'Mode fourni par le navigateur' : 'Mode web complet'}</strong><p>{mode === 'online' ? 'Le texte est envoyé à MyMemory, qui indique pouvoir conserver les segments. Quota gratuit anonyme : 5 000 caractères par jour.' : isBrowserNative ? 'Le navigateur traduit en priorité. Si la paire de langues n’est pas disponible, un moteur local prend le relais (téléchargement initial d’environ 700 Mo, connexion requise).' : 'Votre navigateur n’intègre pas d’API de traduction native. Un modèle multilingue lourd (~700 Mo) sera téléchargé la première fois ; une fois en cache, il peut fonctionner hors ligne sur cet appareil.'}</p></div><span className="note-arrow">{mode === 'online' ? <Check size={17} /> : <Smartphone size={17} />}</span></div>
 
         <footer className="page-footer"><span>AUCUN ACCÈS À L’AUDIO</span><span className="footer-separator" /><span>{mode === 'online' ? 'COMPATIBLE WEB ET MOBILE' : 'MOTEUR LOCAL'}</span></footer>
       </section>
@@ -296,4 +306,3 @@ function App() {
 }
 
 export default App
-
